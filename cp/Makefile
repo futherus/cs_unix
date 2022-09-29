@@ -1,4 +1,3 @@
-SRC = cat.c
 CC = gcc
 CFLAGS = -O2 -mavx -mavx2 -g -fmax-errors=100 -Wall -Wextra  	    \
 	-Waggressive-loop-optimizations 	   					\
@@ -43,7 +42,8 @@ CFLAGS = -O2 -mavx -mavx2 -g -fmax-errors=100 -Wall -Wextra  	    \
 	-fPIE                                                           				\
 	-lm -pie
 
-TARGET = mycat
+SRC = cp.c
+TARGET = mycp
 
 all:
 	$(CC) $(CFLAGS) $(SRC) -o $(TARGET)
