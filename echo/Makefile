@@ -11,3 +11,6 @@ all: $(OBJ)
 *.o: *.c
 	$(CC) -c $^ -o $@ $(CFLAGS)
 
+distclean:
+	rm -rf $(TARGET) $(OBJ)
+
