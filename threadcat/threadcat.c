@@ -14,14 +14,14 @@ typedef struct
 {
     int    n_files;
     char** files_arr;
-} args_t;
+} Args;
 
 const char* PROGNAME = NULL;
 
 static int
 error(char* fmt, ...)
 {
-    fprintf(stderr, "%s: ", PROGNAME);
+//    fprintf(stderr, "%s: ", PROGNAME);
 
 	va_list args = {};
 	va_start(args, fmt);
@@ -32,7 +32,7 @@ error(char* fmt, ...)
 }
 
 static int
-parse_args(int argc, char* argv[], args_t* args)
+parseArgs(int argc, char* argv[], Args* args)
 {
     if (getopt(argc, argv, "") != -1)
         return 1;
@@ -58,10 +58,10 @@ typedef struct
     size_t head;
     size_t tail;
     size_t size;
-} circbuffer_t;
+} CircBuffer;
 
 int
-circbuffer_ctor(circbuffer_t* cbuf, size_t buffer_cap, size_t n_buffer)
+circBufferCtor(CircBuffer* cbuf, size_t buffer_cap, size_t n_buffer)
 {
     assert(buffer_cap > 0 && n_buffer > 0 && "circular buffer with 0 size");
 
@@ -91,7 +91,7 @@ circbuffer_ctor(circbuffer_t* cbuf, size_t buffer_cap, size_t n_buffer)
 }
 
 int
-circbuffer_dtor(circbuffer_t* cbuf)
+circBufferDtor(CircBuffer* cbuf)
 {
     /* dtor or wait for all releases? */
 
@@ -104,7 +104,7 @@ circbuffer_dtor(circbuffer_t* cbuf)
 }
 
 size_t
-circbuffer_get_cap(circbuffer_t* cbuf)
+circBufferGetCap(CircBuffer* cbuf)
 {
     assert(cbuf->buffer_cap);
 
@@ -112,11 +112,13 @@ circbuffer_get_cap(circbuffer_t* cbuf)
 }
 
 int
-circbuffer_get_write(circbuffer_t* cbuf, char** dest)
+circBufferAcquireEmpty(CircBuffer* cbuf, char** dest)
 {
     pthread_mutex_lock(&cbuf->mutex);
 
-    if (cbuf->size == cbuf->n_buffer)
+    /* we have to re-check after cond_wait, because other thread on this
+     * condition can acquire lock before us */
+    while (cbuf->size == cbuf->n_buffer)
         pthread_cond_wait(&cbuf->not_full, &cbuf->mutex); /* error handle */
 
     *dest = cbuf->buffers_data + cbuf->tail * cbuf->buffer_cap;
@@ -127,7 +129,7 @@ circbuffer_get_write(circbuffer_t* cbuf, char** dest)
 }
 
 int
-circbuffer_release_write(circbuffer_t* cbuf, size_t buf_sz)
+circBufferReleaseEmpty(CircBuffer* cbuf, size_t buf_sz)
 {
     pthread_mutex_lock(&cbuf->mutex);
 
@@ -149,16 +151,17 @@ circbuffer_release_write(circbuffer_t* cbuf, size_t buf_sz)
 }
 
 int
-circbuffer_get_read(circbuffer_t* cbuf, char** dest, size_t* buf_sz)
+circBufferAcquireFull(CircBuffer* cbuf, char** dest, size_t* buf_sz)
 {
     error("%s: entered\n", __PRETTY_FUNCTION__);
     pthread_mutex_lock(&cbuf->mutex);
 
     error("%s: got lock, size = %zu\n", __PRETTY_FUNCTION__, cbuf->size);
-    if (cbuf->size == 0)
+    /* we have to re-check after cond_wait, because other thread on this
+     * condition can acquire lock before us */
+    while (cbuf->size == 0)
     {
-        error("%s: waiting for not_empty\n" "cbuf=%p, &cbuf=%p", __PRETTY_FUNCTION__,
-              cbuf, &cbuf);
+        error("%s: waiting for not_empty\n" "cbuf=%p, &cbuf=%p\n", __PRETTY_FUNCTION__, cbuf, &cbuf);
         pthread_cond_wait(&cbuf->not_empty, &cbuf->mutex);
     }
 
@@ -173,7 +176,7 @@ circbuffer_get_read(circbuffer_t* cbuf, char** dest, size_t* buf_sz)
 }
 
 int
-circbuffer_release_read(circbuffer_t* cbuf)
+circBufferReleaseFull(CircBuffer* cbuf)
 {
     pthread_mutex_lock(&cbuf->mutex);
 
@@ -193,17 +196,18 @@ circbuffer_release_read(circbuffer_t* cbuf)
 /******************************************************************************/
 
 static int
-read_to_cbuf(circbuffer_t* cbuf, int fd)
+readToCbuf(CircBuffer* cbuf, int fd)
 {
     char* buf = NULL;
     ssize_t n_read = 0;
-    size_t buf_cap = circbuffer_get_cap(cbuf);
+    size_t buf_cap = circBufferGetCap(cbuf);
 
     int saved_errno = 0;
 
     do
     {
-        circbuffer_get_write(cbuf, &buf);
+        error("Acquiring empty\n");
+        circBufferAcquireEmpty(cbuf, &buf);
 
         n_read = read(fd, buf, buf_cap - 1);
         if (n_read > 0)
@@ -211,7 +215,8 @@ read_to_cbuf(circbuffer_t* cbuf, int fd)
         else
             saved_errno = errno;
 
-        circbuffer_release_write(cbuf, (size_t) n_read);
+        error("Releasing empty\n");
+        circBufferReleaseEmpty(cbuf, (size_t) n_read);
     }
     while (n_read > 0);
 
@@ -222,7 +227,7 @@ read_to_cbuf(circbuffer_t* cbuf, int fd)
 }
 
 static int
-cat_files(circbuffer_t* cbuf, const args_t* args)
+catFiles(CircBuffer* cbuf, const Args* args)
 {
     char* filename = NULL;
     int fd = 0;
@@ -238,7 +243,7 @@ cat_files(circbuffer_t* cbuf, const args_t* args)
             return error("cannot open %s: %s\n", filename, strerror(errno));
         }
 
-        read_to_cbuf(cbuf, fd);
+        readToCbuf(cbuf, fd);
 
         error("cat files: closing %s\n", filename);
         close(fd);
@@ -249,9 +254,9 @@ cat_files(circbuffer_t* cbuf, const args_t* args)
 }
 
 static int
-cat_interactive(circbuffer_t* cbuf)
+catInteractive(CircBuffer* cbuf)
 {
-    read_to_cbuf(cbuf, STDIN_FILENO);
+    readToCbuf(cbuf, STDIN_FILENO);
 
     return 0;
 }
@@ -260,20 +265,24 @@ cat_interactive(circbuffer_t* cbuf)
 
 typedef struct
 {
-    circbuffer_t* cbuf;
-    const args_t* args;
-} reader_args_t;
+    CircBuffer* cbuf;
+    const Args* args;
+} ReaderArgs;
 
 static void*
-reader_start(void* arg_ptr)
+readerStart(void* arg_ptr)
 {
-    error("reader started\n" "stack: %p\n", &arg_ptr);
-    reader_args_t* ptr = (reader_args_t*) arg_ptr;
+    error("reader started, stack: %p\n", &arg_ptr);
+    ReaderArgs* ptr = (ReaderArgs*) arg_ptr;
+
+    error("n_files = %d\n", ptr->args->n_files);
+    for (int i = 0; i < ptr->args->n_files; i++)
+        error("\t%s\n", ptr->args->files_arr[i]);
 
     if (ptr->args->n_files == 0)
-        cat_interactive(ptr->cbuf);
+        catInteractive(ptr->cbuf);
     else
-        cat_files(ptr->cbuf, ptr->args);
+        catFiles(ptr->cbuf, ptr->args);
 
     error("reader returning\n");
     return NULL;
@@ -282,11 +291,11 @@ reader_start(void* arg_ptr)
 typedef struct
 {
     int fd;
-    circbuffer_t* cbuf;
-} writer_args_t;
+    CircBuffer* cbuf;
+} WriterArgs;
 
 static int
-write_from_cbuf(int fd, circbuffer_t* cbuf)
+writeFromCbuf(int fd, CircBuffer* cbuf)
 {
     char* buf = NULL;
     size_t buf_sz = 0;
@@ -294,9 +303,9 @@ write_from_cbuf(int fd, circbuffer_t* cbuf)
     /* should be cancelled */
     while (1)
     {
-        circbuffer_get_read(cbuf, &buf, &buf_sz);
+        circBufferAcquireFull(cbuf, &buf, &buf_sz);
         write(fd, buf, buf_sz);
-        circbuffer_release_read(cbuf);
+        circBufferReleaseFull(cbuf);
     }
 
     /*
@@ -305,8 +314,9 @@ write_from_cbuf(int fd, circbuffer_t* cbuf)
     return -1;
 }
 
+/*
 static int
-dummy(int fd, circbuffer_t* cbuf)
+dummy(int fd, CircBuffer* cbuf)
 {
     error("%s: entered\n", __PRETTY_FUNCTION__);
 
@@ -319,18 +329,19 @@ dummy(int fd, circbuffer_t* cbuf)
 
     return -1;
 }
+*/
 
 static void*
-writer_start(void* arg_ptr)
+writerStart(void* arg_ptr)
 {
     error("writer started\n" "stack: %p\n", &arg_ptr);
-    writer_args_t* ptr = (writer_args_t*) arg_ptr;
+    WriterArgs* ptr = (WriterArgs*) arg_ptr;
+    writeFromCbuf(ptr->fd, ptr->cbuf);
 /*
-    write_from_cbuf(ptr->fd, ptr->cbuf);
     while(1)
         pthread_cond_wait(&ptr->cbuf->not_full, &ptr->cbuf->mutex);
-*/
     dummy(ptr->fd, ptr->cbuf);
+*/
     error("writer returning\n");
     return NULL;
 }
@@ -342,24 +353,24 @@ main(int argc, char* argv[])
 {
     PROGNAME = argv[0];
 
-    args_t args = {};
-    if (parse_args(argc, argv, &args) != 0)
+    Args args = {};
+    if (parseArgs(argc, argv, &args) != 0)
         return 1;
 
     int retval = 0;
 
-    circbuffer_t cbuf = {0};
-    circbuffer_ctor(&cbuf, 256, 16);
+    CircBuffer cbuf = {0};
+    circBufferCtor(&cbuf, 256, 16);
 
     error("starting reader\n");
     pthread_t reader_tid = 0;
-    reader_args_t reader_args = {.args = &args, .cbuf = &cbuf};
-    pthread_create(&reader_tid, NULL, reader_start, &reader_args); 
+    ReaderArgs reader_args = {.args = &args, .cbuf = &cbuf};
+    pthread_create(&reader_tid, NULL, readerStart, &reader_args); 
 
     error("starting writer\n");
     pthread_t writer_tid = 0;
-    writer_args_t writer_args = {.fd = STDOUT_FILENO, .cbuf = &cbuf};
-    pthread_create(&writer_tid, NULL, writer_start, &writer_args); 
+    WriterArgs writer_args = {.fd = STDOUT_FILENO, .cbuf = &cbuf};
+    pthread_create(&writer_tid, NULL, writerStart, &writer_args); 
 
     error("joining reader\n");
     void* thread_retval = NULL;
@@ -372,7 +383,7 @@ main(int argc, char* argv[])
     pthread_join(writer_tid, &thread_retval);
 
     error("main returning\n");
-    /* circbuffer_dtor() */
+    /* circBufferDtor() */
 
     return retval;
 }
