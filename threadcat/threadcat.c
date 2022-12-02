@@ -373,7 +373,7 @@ main(int argc, char* argv[])
     pthread_join(writer_tid, &thread_retval);
 
     $DBG("main returning");
-    /* circBufferDtor() */
+    circBufferDtor(&cbuf);
 
     return retval;
 }
