@@ -66,7 +66,7 @@ typedef struct
     size_t size;
 } CircBuffer;
 
-int
+static int
 circBufferCtor(CircBuffer* cbuf, size_t buffer_cap, size_t n_buffer)
 {
     assert(buffer_cap > 0 && n_buffer > 0 && "circular buffer with 0 size");
@@ -96,7 +96,7 @@ circBufferCtor(CircBuffer* cbuf, size_t buffer_cap, size_t n_buffer)
     return 0;
 }
 
-int
+static int
 circBufferDtor(CircBuffer* cbuf)
 {
     /* dtor or wait for all releases? */
@@ -109,7 +109,7 @@ circBufferDtor(CircBuffer* cbuf)
     return 0;
 }
 
-size_t
+static size_t
 circBufferGetCap(CircBuffer* cbuf)
 {
     assert(cbuf->buffer_cap);
@@ -117,7 +117,7 @@ circBufferGetCap(CircBuffer* cbuf)
     return cbuf->buffer_cap;
 }
 
-int
+static int
 circBufferAcquireEmpty(CircBuffer* cbuf, char** dest)
 {
     pthread_mutex_lock(&cbuf->mutex);
@@ -134,7 +134,7 @@ circBufferAcquireEmpty(CircBuffer* cbuf, char** dest)
     return 0;
 }
 
-int
+static int
 circBufferReleaseEmpty(CircBuffer* cbuf, size_t buf_sz)
 {
     pthread_mutex_lock(&cbuf->mutex);
@@ -159,7 +159,7 @@ circBufferReleaseEmpty(CircBuffer* cbuf, size_t buf_sz)
     return 0;
 }
 
-int
+static int
 circBufferAcquireFull(CircBuffer* cbuf, char** dest, size_t* buf_sz)
 {
     pthread_mutex_lock(&cbuf->mutex);
@@ -183,7 +183,7 @@ circBufferAcquireFull(CircBuffer* cbuf, char** dest, size_t* buf_sz)
     return 0;
 }
 
-int
+static int
 circBufferReleaseFull(CircBuffer* cbuf)
 {
     pthread_mutex_lock(&cbuf->mutex);
