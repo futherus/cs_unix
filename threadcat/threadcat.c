@@ -10,6 +10,12 @@
 #include <assert.h>
 #include <pthread.h>
 
+#ifdef DEBUG
+    #define $DBG(FMT, ...) fprintf(stderr, "%s: " FMT "\n", __PRETTY_FUNCTION__, ##__VA_ARGS__)
+#else
+    #define $DBG(FMT, ...)
+#endif
+
 typedef struct
 {
     int    n_files;
@@ -21,7 +27,7 @@ const char* PROGNAME = NULL;
 static int
 error(char* fmt, ...)
 {
-//    fprintf(stderr, "%s: ", PROGNAME);
+    fprintf(stderr, "%s: ", PROGNAME);
 
 	va_list args = {};
 	va_start(args, fmt);
@@ -115,14 +121,14 @@ int
 circBufferAcquireEmpty(CircBuffer* cbuf, char** dest)
 {
     pthread_mutex_lock(&cbuf->mutex);
+    $DBG("Entered");
 
-    /* we have to re-check after cond_wait, because other thread on this
-     * condition can acquire lock before us */
-    while (cbuf->size == cbuf->n_buffer)
+    if (cbuf->size == cbuf->n_buffer)
         pthread_cond_wait(&cbuf->not_full, &cbuf->mutex); /* error handle */
 
     *dest = cbuf->buffers_data + cbuf->tail * cbuf->buffer_cap;
 
+    $DBG("Leaving");
     pthread_mutex_unlock(&cbuf->mutex);
 
     return 0;
@@ -132,7 +138,9 @@ int
 circBufferReleaseEmpty(CircBuffer* cbuf, size_t buf_sz)
 {
     pthread_mutex_lock(&cbuf->mutex);
+    $DBG("Entered");
 
+    $DBG("got lock, size = %zu", cbuf->size);
     assert(cbuf->size < cbuf->n_buffer && "write release with full circbuffer");
 
     cbuf->buffers_sz[cbuf->tail] = buf_sz;
@@ -141,10 +149,11 @@ circBufferReleaseEmpty(CircBuffer* cbuf, size_t buf_sz)
 
     if (cbuf->size == 1)
     {
-        error("%s: signal non_empty\n", __PRETTY_FUNCTION__);
+        $DBG("signal non_empty");
         pthread_cond_signal(&cbuf->not_empty);
     }
 
+    $DBG("Leaving");
     pthread_mutex_unlock(&cbuf->mutex);
 
     return 0;
@@ -153,25 +162,24 @@ circBufferReleaseEmpty(CircBuffer* cbuf, size_t buf_sz)
 int
 circBufferAcquireFull(CircBuffer* cbuf, char** dest, size_t* buf_sz)
 {
-    error("%s: entered\n", __PRETTY_FUNCTION__);
     pthread_mutex_lock(&cbuf->mutex);
+    $DBG("Entered");
 
-    error("%s: got lock, size = %zu\n", __PRETTY_FUNCTION__, cbuf->size);
-    /* we have to re-check after cond_wait, because other thread on this
-     * condition can acquire lock before us */
-    while (cbuf->size == 0)
+    $DBG("got lock, size = %zu", cbuf->size);
+    if (cbuf->size == 0)
     {
-        error("%s: waiting for not_empty\n" "cbuf=%p, &cbuf=%p\n", __PRETTY_FUNCTION__, cbuf, &cbuf);
+        $DBG("waiting for not_empty");
+        $DBG("cbuf=%p, &cbuf=%p", cbuf, &cbuf);
         pthread_cond_wait(&cbuf->not_empty, &cbuf->mutex);
     }
 
-    error("%s: writing return arguments\n", __PRETTY_FUNCTION__);
+    $DBG("writing return arguments");
     *dest = cbuf->buffers_data + cbuf->buffer_cap * cbuf->head;
     *buf_sz = cbuf->buffers_sz[cbuf->head];
 
+    $DBG("Leaving");
     pthread_mutex_unlock(&cbuf->mutex);
 
-    error("%s: unlocked, returning\n", __PRETTY_FUNCTION__);
     return 0;
 }
 
@@ -179,6 +187,7 @@ int
 circBufferReleaseFull(CircBuffer* cbuf)
 {
     pthread_mutex_lock(&cbuf->mutex);
+    $DBG("Entered");
 
     assert(cbuf->size > 0 && "read release with zero size");
 
@@ -188,6 +197,7 @@ circBufferReleaseFull(CircBuffer* cbuf)
     if (cbuf->size == cbuf->n_buffer - 1)
         pthread_cond_signal(&cbuf->not_full);
 
+    $DBG("Leaving");
     pthread_mutex_unlock(&cbuf->mutex);
 
     return 0;
@@ -198,6 +208,7 @@ circBufferReleaseFull(CircBuffer* cbuf)
 static int
 readToCbuf(CircBuffer* cbuf, int fd)
 {
+    $DBG("Entered");
     char* buf = NULL;
     ssize_t n_read = 0;
     size_t buf_cap = circBufferGetCap(cbuf);
@@ -206,7 +217,7 @@ readToCbuf(CircBuffer* cbuf, int fd)
 
     do
     {
-        error("Acquiring empty\n");
+        $DBG("Acquiring empty");
         circBufferAcquireEmpty(cbuf, &buf);
 
         n_read = read(fd, buf, buf_cap - 1);
@@ -215,7 +226,7 @@ readToCbuf(CircBuffer* cbuf, int fd)
         else
             saved_errno = errno;
 
-        error("Releasing empty\n");
+        $DBG("Releasing empty");
         circBufferReleaseEmpty(cbuf, (size_t) n_read);
     }
     while (n_read > 0);
@@ -223,7 +234,29 @@ readToCbuf(CircBuffer* cbuf, int fd)
     if (n_read < 0)
         return error("read failed: %s\n", strerror(saved_errno));
    
+    $DBG("Leaving");
     return 0;
+}
+
+static int
+writeFromCbuf(int fd, CircBuffer* cbuf)
+{
+    $DBG("Entered");
+    char* buf = NULL;
+    size_t buf_sz = 0;
+
+    /* should be cancelled */
+    while (1)
+    {
+        circBufferAcquireFull(cbuf, &buf, &buf_sz);
+#ifndef DEBUG
+        write(fd, buf, buf_sz);
+#endif
+        circBufferReleaseFull(cbuf);
+    }
+
+    assert(0 && "unreachable");
+    return -1;
 }
 
 static int
@@ -236,16 +269,14 @@ catFiles(CircBuffer* cbuf, const Args* args)
     {
         filename = args->files_arr[file_num];
 
-        error("cat files: opening %s\n", filename);
+        $DBG("cat files: opening %s", filename);
         fd = open(filename, O_RDONLY);
         if (fd == -1)
-        {
             return error("cannot open %s: %s\n", filename, strerror(errno));
-        }
 
         readToCbuf(cbuf, fd);
 
-        error("cat files: closing %s\n", filename);
+        $DBG("cat files: closing %s", filename);
         close(fd);
         fd = 0;
     }
@@ -272,19 +303,19 @@ typedef struct
 static void*
 readerStart(void* arg_ptr)
 {
-    error("reader started, stack: %p\n", &arg_ptr);
+    $DBG("reader started, stack: %p", &arg_ptr);
     ReaderArgs* ptr = (ReaderArgs*) arg_ptr;
 
-    error("n_files = %d\n", ptr->args->n_files);
+    $DBG("n_files = %d", ptr->args->n_files);
     for (int i = 0; i < ptr->args->n_files; i++)
-        error("\t%s\n", ptr->args->files_arr[i]);
+        $DBG("\t%s", ptr->args->files_arr[i]);
 
     if (ptr->args->n_files == 0)
         catInteractive(ptr->cbuf);
     else
         catFiles(ptr->cbuf, ptr->args);
 
-    error("reader returning\n");
+    $DBG("reader returning");
     return NULL;
 }
 
@@ -294,55 +325,14 @@ typedef struct
     CircBuffer* cbuf;
 } WriterArgs;
 
-static int
-writeFromCbuf(int fd, CircBuffer* cbuf)
-{
-    char* buf = NULL;
-    size_t buf_sz = 0;
-
-    /* should be cancelled */
-    while (1)
-    {
-        circBufferAcquireFull(cbuf, &buf, &buf_sz);
-        write(fd, buf, buf_sz);
-        circBufferReleaseFull(cbuf);
-    }
-
-    /*
-    assert(0 && "unreachable");
-    */
-    return -1;
-}
-
-/*
-static int
-dummy(int fd, CircBuffer* cbuf)
-{
-    error("%s: entered\n", __PRETTY_FUNCTION__);
-
-    char* buf = NULL;
-    size_t buf_sz = 0;
-    while(1)
-    {
-
-    }
-
-    return -1;
-}
-*/
-
 static void*
 writerStart(void* arg_ptr)
 {
-    error("writer started\n" "stack: %p\n", &arg_ptr);
+    $DBG("writer started, stack: %p", &arg_ptr);
     WriterArgs* ptr = (WriterArgs*) arg_ptr;
     writeFromCbuf(ptr->fd, ptr->cbuf);
-/*
-    while(1)
-        pthread_cond_wait(&ptr->cbuf->not_full, &ptr->cbuf->mutex);
-    dummy(ptr->fd, ptr->cbuf);
-*/
-    error("writer returning\n");
+
+    $DBG("writer returning");
     return NULL;
 }
 
@@ -362,27 +352,27 @@ main(int argc, char* argv[])
     CircBuffer cbuf = {0};
     circBufferCtor(&cbuf, 256, 16);
 
-    error("starting reader\n");
+    $DBG("starting reader");
     pthread_t reader_tid = 0;
     ReaderArgs reader_args = {.args = &args, .cbuf = &cbuf};
     pthread_create(&reader_tid, NULL, readerStart, &reader_args); 
 
-    error("starting writer\n");
+    $DBG("starting writer");
     pthread_t writer_tid = 0;
     WriterArgs writer_args = {.fd = STDOUT_FILENO, .cbuf = &cbuf};
     pthread_create(&writer_tid, NULL, writerStart, &writer_args); 
 
-    error("joining reader\n");
+    $DBG("joining reader");
     void* thread_retval = NULL;
     retval = pthread_join(reader_tid, &thread_retval);
 
-    error("joining writer\n");
+    $DBG("joining writer");
     retval = pthread_cancel(writer_tid);
     if (retval != 0)
         error("writer cancel failed: %s\n", strerror(retval));
     pthread_join(writer_tid, &thread_retval);
 
-    error("main returning\n");
+    $DBG("main returning");
     /* circBufferDtor() */
 
     return retval;
