@@ -11,19 +11,11 @@
 #include <pthread.h>
 #include <time.h>
 
-#include "stack.h"
-
 #ifdef DEBUG
     #define $DBG(FMT, ...) fprintf(stderr, "%s: " FMT "\n", __PRETTY_FUNCTION__, ##__VA_ARGS__)
 #else
     #define $DBG(FMT, ...)
 #endif
-
-typedef struct
-{
-    int    n_files;
-    char** files_arr;
-} Args;
 
 const char* PROGNAME = NULL;
 
@@ -40,34 +32,27 @@ error(char* fmt, ...)
 	return 1;
 }
 
-static int
-parseArgs(int argc, char* argv[], Args* args)
-{
-    if (getopt(argc, argv, "") != -1)
-        return 1;
-    
-    args->n_files   = argc - optind;
-    args->files_arr = argv + optind;
-
-    return 0;
-}
-
-#define N_THREADS (4)
-#define DATA_SZ (N_THREADS * 10)
-
 typedef struct
 {
     int* data;
     size_t size;
+    size_t offset;
 } Buffer;
 
 static void
-printData(Buffer* data_buf)
+printBuffer(Buffer* buf)
 {
-    for (size_t i = 0; i < data_buf->size; i++)
-        printf("%d ", data_buf->data[i]);
-    
-    printf("\n");
+    fprintf(stderr, "size: %zu\n", buf->size);
+    fprintf(stderr, "offset: %zu\n", buf->offset);
+    for (size_t i = 0; i < buf->size; i++)
+    {
+        if (i == buf->offset)
+            fprintf(stderr, ">%d", buf->data[i]);
+        else
+            fprintf(stderr, " %d", buf->data[i]);
+    }
+ 
+    fprintf(stderr, "\n");
 }
 
 static int
@@ -85,8 +70,9 @@ static int
 sorter(Buffer* buf)
 {
     $DBG("qsort");
+   
     qsort(buf->data, buf->size, sizeof(int), compareInts);
-
+    
     return 0;
 }
 
@@ -103,54 +89,33 @@ sorterStart(void* arg_ptr)
 }
 
 static int
-print_indxes(size_t* indxes, size_t size)
-{
-    for (size_t i = 0; i < size; i++)
-        fprintf(stderr, "%zu ", indxes[i]);
-
-    fprintf(stderr, "\n");
-}
-
-static int
 merger(Buffer* out, Buffer* in_arr, size_t in_arr_sz)
 {
-    size_t out_indx = 0;
-    size_t* in_indxes = (size_t*) calloc(in_arr_sz, sizeof(size_t));
-    if (!in_indxes)
-        return error("cannot allocate memory");
-
-    while (out_indx < out->size)
+    while (out->offset < out->size)
     {
-        size_t min_indx = 0;
+        Buffer* min = in_arr;
 
-        for (size_t i = 1; i < in_arr_sz; i++)
+        for (Buffer* cur = in_arr + 1; cur < in_arr + in_arr_sz; cur++)
         {
-            if (in_indxes[i] == in_arr[i].size)
-                continue;
-
-            if (in_indxes[min_indx] == in_arr[min_indx].size)
+            if (min->offset == min->size)
             {
-                min_indx = i;
+                min = cur;
                 continue;
             }
 
-            if (in_arr[i].data[in_indxes[i]] < in_arr[min_indx].data[in_indxes[min_indx]])
-                min_indx = i;
+            if (cur->offset < cur->size &&
+                cur->data[cur->offset] < min->data[min->offset])
+            {
+                min = cur;
+            }
         }
-        if (in_arr[min_indx].size == in_indxes[min_indx])
-            $DBG("fail");
 
-//        print_indxes(in_indxes, in_arr_sz);
-        out->data[out_indx] = in_arr[min_indx].data[in_indxes[min_indx]];
-        $DBG("%zu: val = %d", min_indx, out->data[out_indx]);
-        in_indxes[min_indx]++;
-        out_indx++;
+        out->data[out->offset] = min->data[min->offset];
 
-//        printData(out);
-        $DBG("size: %zu", out_indx);
+        out->offset++;
+        min->offset++;
     }
 
-    free(in_indxes);
     return 0;
 }
 
@@ -174,12 +139,12 @@ checker(Buffer* raw_buf, Buffer* sorted_buf)
 }
 
 static void
-genData(Buffer* data_buf)
+genData(Buffer* buf)
 {
-    srand(time(NULL));
+    srand((unsigned int) time(NULL));
 
-    for (size_t i = 0; i < data_buf->size; i++)
-        data_buf->data[i] = rand() % DATA_SZ;
+    for (size_t i = 0; i < buf->size; i++)
+        buf->data[i] = rand() % (int) buf->size;
 }
 
 int
@@ -187,67 +152,86 @@ main(int argc, char* argv[])
 {
     PROGNAME = argv[0];
 
+    if (argc != 3)
+        return error("Wrong amount of parameters\n");
+
+    size_t data_sz = (size_t) atoi(argv[1]);
+    size_t n_threads = (size_t) atoi(argv[2]);
+
+    /* generate data */
     Buffer init_data = {
-        .data = (int*) malloc(DATA_SZ * sizeof(int)),
-        .size = DATA_SZ
+        .data = (int*) malloc(data_sz * sizeof(int)),
+        .size = data_sz
     };
     if (!init_data.data)
         return error("cannot allocate memory");
 
-    Buffer merged_data = {
-        .data = (int*) malloc(DATA_SZ * sizeof(int)),
-        .size = DATA_SZ
-    };
-    if (!merged_data.data)
-        return error("cannot allocate memory");
-
     genData(&init_data);
     $DBG("initial data");
-    printData(&init_data);
+    printBuffer(&init_data);
 
-    pthread_t sorter_tids[N_THREADS] = {0};
-    Buffer* sorter_bufs = (Buffer*) malloc(N_THREADS * sizeof(Buffer));
+    /* create sorters */
+    pthread_t* sorter_tids = (pthread_t*) malloc(n_threads * sizeof(pthread_t));
+    Buffer* sorter_bufs = (Buffer*) malloc(n_threads * sizeof(Buffer));
     if (!sorter_bufs)
         return error("cannot allocate memory");
 
+    size_t sorter_sz = data_sz / n_threads;
+    size_t tail_sz = data_sz % n_threads;
+
     $DBG("starting sorters");
     int* sorter_ptr = init_data.data;
-    size_t tail_sz = DATA_SZ;
-    for (size_t i = 0; i < N_THREADS; i++)
+    for (size_t i = 0; i < n_threads; i++)
     {
-        size_t sorter_sz = DATA_SZ / N_THREADS;
-        if (sorter_sz + sorter_ptr
-
-        sorter_bufs[i].data = (int*) malloc(sorter_sz * sizeof(int));
-        sorter_bufs[i].size = sorter_sz;
-        memcpy(sorter_bufs[i].data, sorter_ptr, sorter_sz * sizeof(int));
-        sorter_ptr += sorter_sz;
-
-        $DBG("before pthread");
+        size_t tmp_sz = sorter_sz;
+        if (i < tail_sz)
+            tmp_sz++;
+ 
+        sorter_bufs[i].data = (int*) malloc(tmp_sz * sizeof(int));
+        sorter_bufs[i].size = tmp_sz;
+        sorter_bufs[i].offset = 0;
+        memcpy(sorter_bufs[i].data, sorter_ptr, tmp_sz * sizeof(int));
+        sorter_ptr += tmp_sz;
 
         pthread_create(&sorter_tids[i], NULL, sorterStart, &sorter_bufs[i]); 
     }
 
     $DBG("joining sorters");
-    for (size_t i = 0; i < N_THREADS; i++)
+    for (size_t i = 0; i < n_threads; i++)
     {
         void* thread_retval = NULL;
         pthread_join(sorter_tids[i], &thread_retval);
     }
 
-    $DBG("merger");
-    merger(&merged_data, sorter_bufs, N_THREADS);
-    printData(&merged_data);
+/*
+    for (size_t i = 0; i < n_threads; i++)
+        printBuffer(&sorter_bufs[i]);
+*/
 
+    /* merge sorters' data */
+    Buffer merged_data = {
+        .data = (int*) malloc(data_sz * sizeof(int)),
+        .size = data_sz
+    };
+    if (!merged_data.data)
+        return error("cannot allocate memory");
+
+    $DBG("merger");
+    merger(&merged_data, sorter_bufs, n_threads);
+    printBuffer(&merged_data);
+
+    /* check data */
     $DBG("checker");
     checker(&init_data, &merged_data);
 
+    /* cleanup */
     free(init_data.data);
     free(merged_data.data);
-    for (size_t i = 0; i < N_THREADS; i++)
+    for (size_t i = 0; i < n_threads; i++)
         free(sorter_bufs[i].data);
 
     free(sorter_bufs);
+    free(sorter_tids);
 
     $DBG("main returning");
 
